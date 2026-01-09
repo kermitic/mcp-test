@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: mcp-server
+    runtime: node
+    plan: free
+    buildCommand: cd mcp-server && npm install
+    startCommand: cd mcp-server && npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: WEATHER_API_KEY
+        sync: false

@@ -1,0 +1,28 @@
+{
+  "name": "greet_store",
+  "description": "업체명을 입력받아 환영 인사와 날씨 정보를 반환합니다.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "store_name": {
+        "type": "string",
+        "description": "조회할 업체명"
+      }
+    },
+    "required": ["store_name"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "greeting": {
+        "type": "string",
+        "description": "업체의 환영 인사 문구"
+      },
+      "weather_summary": {
+        "type": "string",
+        "description": "업체 위치 기준 현재 날씨 요약"
+      }
+    },
+    "required": ["greeting", "weather_summary"]
+  }
+}

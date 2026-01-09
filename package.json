@@ -1,0 +1,15 @@
+{
+  "name": "mcp-store-greeting",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "mcp-server",
+    "admin-web"
+  ],
+  "scripts": {
+    "dev:mcp": "cd mcp-server && npm run dev",
+    "dev:admin": "cd admin-web && npm run dev",
+    "install:all": "npm install && cd mcp-server && npm install && cd ../admin-web && npm install",
+    "test:mcp": "node test-mcp-server.js"
+  }
+}
