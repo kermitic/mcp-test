@@ -1,11 +1,16 @@
 import Fastify from 'fastify';
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
+import { randomUUID } from 'node:crypto';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import * as z from 'zod';
 
 dotenv.config();
 
 const fastify = Fastify({
-  logger: true
+  logger: true,
 });
 
 const supabase = createClient(
@@ -13,23 +18,26 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
+// 세션별 transport 저장
+const transports = {};
+
 // 날씨 API 호출 함수
 async function getWeatherSummary(lat, lng) {
   const apiKey = process.env.WEATHER_API_KEY;
   const apiUrl = `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lng}&appid=${apiKey}&units=metric&lang=kr`;
-  
+
   try {
     const response = await fetch(apiUrl);
     const data = await response.json();
-    
+
     if (data.cod !== 200) {
       return `날씨 정보를 가져올 수 없습니다.`;
     }
-    
+
     const weather = data.weather[0];
     const temp = Math.round(data.main.temp);
     const description = weather.description;
-    
+
     return `현재 ${description}, ${temp}°C`;
   } catch (error) {
     console.error('Weather API error:', error);
@@ -37,47 +45,146 @@ async function getWeatherSummary(lat, lng) {
   }
 }
 
-// MCP Tool: greet_store
-fastify.post('/rpc/greet_store', async (request, reply) => {
-  const { store_name } = request.body;
-  
-  if (!store_name) {
-    return reply.code(400).send({
-      error: 'store_name is required'
-    });
+// MCP 엔드포인트 처리 함수
+async function handleMcpRequest(request, reply) {
+  // Fastify가 자동으로 응답을 보내지 않도록 먼저 hijack
+  await reply.hijack();
+
+  const sessionId = request.headers['mcp-session-id'];
+  let transport = sessionId ? transports[sessionId] : null;
+
+  // Fastify의 원시 request/response 객체 사용
+  const req = request.raw;
+  const res = reply.raw;
+
+  // 요청 본문 파싱 (이미 Fastify가 파싱했지만 원시 객체에 추가)
+  if (request.body && !req.body) {
+    req.body = request.body;
   }
-  
-  try {
-    // Supabase에서 업체 정보 조회
-    const { data: store, error } = await supabase
-      .from('stores')
-      .select('greeting_message, lat, lng, address_text')
-      .eq('store_name', store_name)
-      .single();
-    
-    if (error || !store) {
-      return reply.code(404).send({
-        error: 'Store not found'
-      });
-    }
-    
-    // 날씨 정보 조회
-    let weatherSummary = '날씨 정보 없음';
-    if (store.lat && store.lng) {
-      weatherSummary = await getWeatherSummary(store.lat, store.lng);
-    }
-    
-    // 정규화된 JSON 반환
-    return {
-      greeting: store.greeting_message,
-      weather_summary: `${store_name}(${store.address_text})는 지금 ${weatherSummary}`
+
+  // 세션이 없고 초기화 요청인 경우 새 세션 생성
+  if (!transport && isInitializeRequest(request.body)) {
+    transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (id) => {
+        transports[id] = transport;
+        console.log('MCP Session initialized:', id);
+      },
+      onsessionclosed: (id) => {
+        delete transports[id];
+        console.log('MCP Session closed:', id);
+      },
+    });
+
+    transport.onclose = () => {
+      if (transport.sessionId) {
+        delete transports[transport.sessionId];
+      }
     };
-  } catch (error) {
-    console.error('Error:', error);
-    return reply.code(500).send({
-      error: 'Internal server error'
+
+    const server = new McpServer({
+      name: 'travel-store-server',
+      version: '1.0.0',
     });
+
+    // greet_store 도구 등록
+    server.registerTool(
+      'greet_store',
+      {
+        title: '업체 환영 인사 및 날씨 정보',
+        description: '업체명을 입력받아 환영 인사와 날씨 정보를 반환합니다.',
+        inputSchema: {
+          store_name: z.string().describe('조회할 업체명'),
+        },
+        outputSchema: {
+          greeting: z.string().describe('업체의 환영 인사 문구'),
+          weather_summary: z.string().describe('업체 위치 기준 현재 날씨 요약'),
+        },
+      },
+      async ({ store_name }) => {
+        if (!store_name) {
+          throw new Error('store_name is required');
+        }
+
+        try {
+          // Supabase에서 업체 정보 조회
+          const { data: store, error } = await supabase
+            .from('stores')
+            .select('greeting_message, lat, lng, address_text')
+            .eq('store_name', store_name)
+            .single();
+
+          if (error || !store) {
+            throw new Error(`Store not found: ${store_name}`);
+          }
+
+          // 날씨 정보 조회
+          let weatherSummary = '날씨 정보 없음';
+          if (store.lat && store.lng) {
+            weatherSummary = await getWeatherSummary(store.lat, store.lng);
+          }
+
+          const result = {
+            greeting: store.greeting_message,
+            weather_summary: `${store_name}(${store.address_text})는 지금 ${weatherSummary}`,
+          };
+
+          return {
+            content: [{ type: 'text', text: JSON.stringify(result) }],
+            structuredContent: result,
+          };
+        } catch (error) {
+          console.error('Error in greet_store:', error);
+          throw error;
+        }
+      }
+    );
+
+    await server.connect(transport);
+  } else if (!transport) {
+    // 유효하지 않은 세션
+    res.statusCode = 400;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        error: { code: -32000, message: 'Invalid session' },
+        id: null,
+      })
+    );
+    return;
   }
+
+  // 요청 처리
+  try {
+    await transport.handleRequest(req, res, request.body);
+  } catch (error) {
+    console.error('Error handling MCP request:', error);
+    if (!res.headersSent) {
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          error: { code: -32603, message: 'Internal error' },
+          id: request.body?.id || null,
+        })
+      );
+    }
+  }
+}
+
+// MCP 엔드포인트: POST, GET, DELETE
+fastify.post('/mcp', async (request, reply) => {
+  await handleMcpRequest(request, reply);
+});
+
+fastify.get('/mcp', async (request, reply) => {
+  await handleMcpRequest(request, reply);
+});
+
+fastify.delete('/mcp', async (request, reply) => {
+  await handleMcpRequest(request, reply);
 });
 
 // Health check
@@ -90,6 +197,7 @@ const start = async () => {
     const port = process.env.PORT || 3000;
     await fastify.listen({ port, host: '0.0.0.0' });
     console.log(`MCP Server running on port ${port}`);
+    console.log(`MCP endpoint: http://0.0.0.0:${port}/mcp`);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);
