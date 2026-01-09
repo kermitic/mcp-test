@@ -99,6 +99,8 @@ async function handleMcpRequest(request, reply) {
         outputSchema: {
           greeting: z.string().describe('업체의 환영 인사 문구'),
           weather_summary: z.string().describe('업체 위치 기준 현재 날씨 요약'),
+          matched_name: z.string().describe('매칭된 실제 업체명'),
+          similarity_score: z.number().describe('유사도 점수 (0.0 ~ 1.0)'),
         },
       },
       async ({ store_name }) => {
@@ -107,26 +109,45 @@ async function handleMcpRequest(request, reply) {
         }
 
         try {
-          // Supabase에서 업체 정보 조회
-          const { data: store, error } = await supabase
-            .from('stores')
-            .select('greeting_message, lat, lng, address_text')
-            .eq('store_name', store_name)
-            .single();
+          // pg_trgm의 similarity 함수를 사용한 유사도 검색
+          // RPC 함수를 통해 PostgreSQL의 similarity 함수 호출
+          const { data: stores, error } = await supabase.rpc(
+            'search_similar_store',
+            {
+              search_name: store_name,
+              similarity_threshold: 0.3,
+            }
+          );
 
-          if (error || !store) {
-            throw new Error(`Store not found: ${store_name}`);
+          if (error) {
+            console.error('RPC function error:', error);
+            throw new Error(`Failed to search store: ${error.message}`);
           }
+
+          if (!stores || stores.length === 0) {
+            throw new Error(
+              `Store not found: ${store_name}. No similar store found with similarity > 0.3`
+            );
+          }
+
+          // 가장 유사한 업체 선택 (이미 RPC 함수에서 정렬되어 있음)
+          const matchedStore = stores[0];
+          const similarityScore = matchedStore.score;
 
           // 날씨 정보 조회
           let weatherSummary = '날씨 정보 없음';
-          if (store.lat && store.lng) {
-            weatherSummary = await getWeatherSummary(store.lat, store.lng);
+          if (matchedStore.lat && matchedStore.lng) {
+            weatherSummary = await getWeatherSummary(
+              matchedStore.lat,
+              matchedStore.lng
+            );
           }
 
           const result = {
-            greeting: store.greeting_message,
-            weather_summary: `${store_name}(${store.address_text})는 지금 ${weatherSummary}`,
+            greeting: `어서오세요! ${matchedStore.store_name} 인사올립니다!`,
+            weather_summary: `${matchedStore.store_name}(${matchedStore.address_text})는 지금 현재 ${weatherSummary}`,
+            matched_name: matchedStore.store_name,
+            similarity_score: similarityScore,
           };
 
           return {
